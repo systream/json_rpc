@@ -15,7 +15,10 @@ all() ->
         invalid_json_test,
         invalid_request_object_test,
         call_error_response_test,
-        batch_test
+        batch_test,
+        batch_empty_test,
+        batch_notification_test,
+        batch_error_test
     ].
 
 init_per_suite(Config) ->
@@ -105,7 +108,7 @@ notification_test(_Config) ->
 
     % error parameter scenario
     assertEncode(<<"{\"jsonrpc\": \"2.0\",",
-            "\"error\": {\"code\": -32603, \"message\": ",
+            "\"error\": {\"code\": -32603, \"message\": \"Internal error\", \"data\": ",
             "\"error {badarity,{fun ", ModuleBBin/binary, ":update/0,[1,2,3,4,5]}}\"},
              \"id\": null}">>, json_rpc:handle_request(Req)),
 
@@ -182,6 +185,43 @@ batch_test(_Config) ->
     BatchRes = json_rpc:handle_request(BatchReq),
     assertEncode(<<"[{\"jsonrpc\": \"2.0\", \"result\": 0, \"id\": 1},
                      {\"jsonrpc\": \"2.0\", \"result\": 0, \"id\": 2}]">>, BatchRes),
+    json_rpc:unregister(<<"subtract">>).
+
+batch_empty_test(_Config) ->
+    BatchReq = <<"[]">>,
+    BatchRes = json_rpc:handle_request(BatchReq),
+    assertEncode(<<"{\"jsonrpc\": \"2.0\",
+                    \"error\": {\"code\": -32600, \"message\": \"Invalid Request\"},
+                    \"id\": null}">>, BatchRes).
+
+batch_notification_test(_Config) ->
+    meck_fun(<<"subtract">>, fun(A, B) -> {ok, A - B} end),
+    meck_fun(<<"notify">>, fun() -> ok end),
+    Req1 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"subtract\", \"params\": [1, 1], \"id\": 1}">>,
+    Req2 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"notify\"}">>,
+    Req3 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"subtract\", \"params\": [2, 1], \"id\": 2}">>,
+    BatchReq = <<"[", Req1/binary, ",", Req2/binary, ",", Req3/binary, "]">>,
+    BatchRes = json_rpc:handle_request(BatchReq),
+    assertEncode(<<"[{\"jsonrpc\": \"2.0\", \"result\": 0, \"id\": 1},
+                     {\"jsonrpc\": \"2.0\", \"result\": 1, \"id\": 2}]">>, BatchRes),
+
+
+    BatchReq1 = <<"[", Req2/binary, ",", Req2/binary, "]">>,
+    ?assertEqual(no_response, json_rpc:handle_request(BatchReq1)),
+
+    json_rpc:unregister(<<"subtract">>),
+    json_rpc:unregister(<<"notify">>).
+
+batch_error_test(_Config) ->
+    meck_fun(<<"subtract">>, fun(A, B) -> {ok, A - B} end),
+    Req1 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"subtract\", \"params\": [1, 1], \"id\": 1}">>,
+    BatchReq = <<"[", Req1/binary, ", 123]">>,
+    BatchRes = json_rpc:handle_request(BatchReq),
+    assertEncode(<<"[{\"jsonrpc\": \"2.0\", \"result\": 0, \"id\": 1},
+                     {\"jsonrpc\": \"2.0\",
+                      \"error\": {\"code\": -32600, \"message\": \"Invalid Request\"},
+                      \"id\": null}]">>, BatchRes),
+
     json_rpc:unregister(<<"subtract">>).
 
 assertEncode(Expect, Current) when is_binary(Current) ->
