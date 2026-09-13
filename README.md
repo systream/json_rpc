@@ -36,7 +36,7 @@ json_rpc:unregister(<<"subtract">>).
 | Return Value | Response |
 |---|---|
 | `{ok, Result}` | Success response: `{"jsonrpc":"2.0","result":Result,"id":Id}` |
-| `ok` | `no_response` (used for notifications) |
+| `ok` (used for notifications) |
 | `{error, {Code, Message}}` | Custom error response with code and message |
 | `{error, {Code, Message, Data}}` | Custom error response with code, message, and error data |
 | `{error, Data}` | Internal error (`-32603`) containing error data |

@@ -74,7 +74,12 @@ decode(#{<<"jsonrpc">> := ?VERSION, <<"error">> := Error} = Data) ->
   Response0 = #{error => Error2},
   maybe_add(id, maps:get(<<"id">>, Data, undefined), Response0);
 decode(Data) when is_binary(Data) ->
-  decode(json:decode(Data));
+  case json:decode(Data) of
+    DecodedData when is_list(DecodedData) ->
+      lists:map(fun decode/1, DecodedData);
+    DecodedData ->
+      decode(DecodedData)
+  end;
 decode(Data) when is_list(Data) ->
   decode(list_to_binary(Data)).
 
@@ -142,8 +147,35 @@ execute(#{method := Method} = DecodedRequest) when is_binary(Method) ->
           error_response(?INTERNAL_ERROR, <<"Internal error">>, Id, {not_proper_response, Else})
       end
   end;
+execute(Requests) when is_list(Requests) ->
+  wait(lists:map(fun spawn_execute/1, Requests), ["]"]);
 execute(_) ->
   error_response(?INVALID_REQUEST, <<"Invalid Request">>, null).
+
+spawn_execute(Request) ->
+  Parent = self(),
+  Ref2 = make_ref(),
+  {Pid, Ref} = spawn_monitor(fun() -> Parent ! {Ref2, execute(Request)} end),
+  {Pid, Ref, Ref2}.
+
+wait([{Pid, Ref, Ref2}], Acc) ->
+  EndResult = receive
+                {Ref2, Result} ->
+                  Result;
+                {'DOWN', Ref, process, Pid, Reason} ->
+                  error_response(?INTERNAL_ERROR, <<"Internal error">>, null, Reason)
+              end,
+  ["[", [EndResult | Acc]];
+wait([{Pid, Ref, Ref2} | Rest], Acc) ->
+  EndResult = receive
+                {Ref2, Result} ->
+                  Result;
+                {'DOWN', Ref, process, Pid, Reason} ->
+                  error_response(?INTERNAL_ERROR, <<"Internal error">>, null, Reason)
+              end,
+  wait(Rest, ["," | [EndResult | Acc]]);
+wait([], Acc) ->
+  Acc.
 
 -spec execute(function(), params()) -> term().
 execute(Function, undefined) ->

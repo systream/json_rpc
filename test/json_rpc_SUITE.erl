@@ -14,7 +14,8 @@ all() ->
         call_non_existent_method_test,
         invalid_json_test,
         invalid_request_object_test,
-        call_error_response_test
+        call_error_response_test,
+        batch_test
     ].
 
 init_per_suite(Config) ->
@@ -173,17 +174,29 @@ invalid_request_object_test(_Config) ->
                     \"error\": {\"code\": -32600, \"message\": \"Invalid Request\"},
                     \"id\": null}">>, Res2).
 
+batch_test(_Config) ->
+    meck_fun(<<"subtract">>, fun(A, B) -> {ok, A - B} end),
+    Req1 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"subtract\", \"params\": [1, 1], \"id\": 1}">>,
+    Req2 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"subtract\", \"params\": [2, 2], \"id\": 2}">>,
+    BatchReq = <<"[", Req1/binary, ",", Req2/binary, "]">>,
+    BatchRes = json_rpc:handle_request(BatchReq),
+    assertEncode(<<"[{\"jsonrpc\": \"2.0\", \"result\": 0, \"id\": 1},
+                     {\"jsonrpc\": \"2.0\", \"result\": 0, \"id\": 2}]">>, BatchRes),
+    json_rpc:unregister(<<"subtract">>).
+
 assertEncode(Expect, Current) when is_binary(Current) ->
     ExpectMap = json:decode(Expect),
     CurrentMap = json:decode(Current),
+    ExpectMapSorted = assert_sort(ExpectMap),
+    CurrentMapSorted = assert_sort(CurrentMap),
     ?assert(
-        ExpectMap =:= CurrentMap,
-        {{expected, ExpectMap}, {current, CurrentMap}, {diff, diff(ExpectMap, CurrentMap)}}
+        ExpectMapSorted =:= CurrentMapSorted,
+        {{expected, ExpectMapSorted}, {current, CurrentMapSorted}, {diff, diff(ExpectMapSorted, CurrentMapSorted)}}
     );
 assertEncode(Expect, Current) when is_list(Current) ->
     assertEncode(Expect, list_to_binary(Current)).
 
-diff(Expect, Current) ->
+diff(Expect, Current) when is_map(Expect) andalso is_map(Current) ->
     maps:fold(fun(K, V, A) ->
        case maps:is_key(K, A) of
            true ->
@@ -193,8 +206,19 @@ diff(Expect, Current) ->
                end;
            _ -> A
        end
-    end, Expect, Current).
+    end, Expect, Current);
+diff(Expect, Current) when is_list(Expect) andalso is_list(Current) ->
+    lists:map(fun ({A, B}) -> diff(A, B) end, lists:zip(Expect, Current)).
 
+assert_sort(Result) when is_list(Result) ->
+    lists:sort(fun assert_sort/2, Result);
+assert_sort(Result) ->
+    Result.
+
+assert_sort(#{<<"id">> := IdA}, #{<<"id">> := IdB}) ->
+    IdA > IdB;
+assert_sort(_, _) ->
+    true.
 
 meck_fun(Method, Fun) ->
     Pint = erlang:unique_integer([positive]),
