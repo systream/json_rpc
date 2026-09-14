@@ -14,6 +14,8 @@ Register functions to handle methods. Handlers are dispatched based on parameter
 ```erlang
 %% Register positional parameter handler
 json_rpc:register(<<"subtract">>, fun(A, B) -> {ok, A - B} end).
+%% or 
+json_rpc:register(<<"subtract">>, fun mymodule:subtract/2).
 
 %% Register named parameter handler
 json_rpc:register(<<"subtract_named">>, fun(#{<<"subtrahend">> := B, <<"minuend">> := A}) ->
@@ -36,7 +38,7 @@ json_rpc:unregister(<<"subtract">>).
 | Return Value | Response |
 |---|---|
 | `{ok, Result}` | Success response: `{"jsonrpc":"2.0","result":Result,"id":Id}` |
-| `ok` (used for notifications) |
+| `ok` | `no_response` (used for notifications) |
 | `{error, {Code, Message}}` | Custom error response with code and message |
 | `{error, {Code, Message, Data}}` | Custom error response with code, message, and error data |
 | `{error, Data}` | Internal error (`-32603`) containing error data |

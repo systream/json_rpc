@@ -2,7 +2,7 @@
 %%% @author Peter Tihanyi
 %%% @copyright (C) 2026, systream
 %%% @doc
-%%%
+%%% JSON-RPC 2.0 Specification Implementation
 %%% @end
 %%%-------------------------------------------------------------------
 -module(json_rpc).
@@ -16,64 +16,78 @@
 -define(INVALID_PARAMS, -32602).
 -define(INTERNAL_ERROR, -32603).
 
--type json_rcp() :: #{}.
--type method() :: binary().
--type id() :: integer() | binary() | null.
+-type json_rpc() :: #{}.
+-type method() :: binary() | string().
+-type id() :: integer() | binary() | float() | null.
 -type params() :: list() | map() | undefined.
 
--export_type([json_rcp/0, method/0, id/0, params/0]).
+-export_type([json_rpc/0, method/0, id/0, params/0]).
 
 %% API
 -export([
   decode/1,
   notification/1, notification/2,
   request/3,
-  response/2, error_response/3,
+  response/2,
+  error_response/3, error_response/4,
   handle_request/1,
   register/2,
-  unregister/1]).
-
+  unregister/1
+]).
 
 -spec register(method(), function()) -> ok.
 register(Method, Fun) ->
-  persistent_term:put({?MODULE, Method}, Fun).
+  persistent_term:put({?MODULE, to_binary(Method)}, Fun).
 
 -spec unregister(method()) -> ok.
 unregister(Method) ->
-  persistent_term:erase({?MODULE, Method}),
+  _ = persistent_term:erase({?MODULE, to_binary(Method)}),
   ok.
 
 -spec handle_request(iodata() | binary()) -> iodata() | no_response.
 handle_request(Request) ->
   try
-    execute(decode(Request))
+    case json:decode(Request) of
+      [] ->
+        error_response(?INVALID_REQUEST, <<"Invalid Request">>, null);
+      Single when is_map(Single) ->
+        execute_single(Single);
+      Batch when is_list(Batch) ->
+        execute_batch(Batch);
+      _Other ->
+        error_response(?INVALID_REQUEST, <<"Invalid Request">>, null)
+    end
   catch
-    error:{invalid_byte, _}:_  ->
+    error:{invalid_byte, _}:_Stack ->
       error_response(?PARSE_ERROR, <<"Parse error">>, null);
-    error:unexpected_end:_  ->
-      error_response(?PARSE_ERROR, <<"Parse error">>, null, unexpected_end);
-    error:{unexpected_sequence, _}:_  ->
-      error_response(?PARSE_ERROR, <<"Parse error">>, null, unexpected_sequence);
-    Type:Error:_St ->
-      error_response(?INTERNAL_ERROR, io_lib:bformat("~p ~p ~p", [Type, Error, _St]), null)
+    error:unexpected_end:_Stack ->
+      error_response(?PARSE_ERROR, <<"Parse error">>, null);
+    error:{unexpected_sequence, _}:_Stack ->
+      error_response(?PARSE_ERROR, <<"Parse error">>, null);
+    _Type:_Error:_Stack ->
+      error_response(?PARSE_ERROR, <<"Parse error">>, null)
   end.
 
--spec decode(binary() | json_rcp() | iodata()) ->
+-spec decode(binary() | iodata() | map() | list()) ->
   #{method := binary(), params => list() | map(), id => id()} |
-  #{response := term(), id => id(), error => #{code := integer(), message => binary(), data => term()}}.
-decode(#{<<"jsonrpc">> := ?VERSION, <<"method">> := Method} = Data) ->
+  #{result => term(), id => id()} |
+  #{error => #{code := integer(), message => binary(), data => term()}, id => id()} |
+  [map()].
+decode(#{<<"jsonrpc">> := ?VERSION, <<"method">> := Method} = Data) when is_binary(Method) ->
   Result0 = #{method => Method},
   Result1 = maybe_add(params, maps:get(<<"params">>, Data, undefined), Result0),
   maybe_add(id, maps:get(<<"id">>, Data, undefined), Result1);
 decode(#{<<"jsonrpc">> := ?VERSION, <<"result">> := Result} = Data) ->
   Response0 = #{result => Result},
   maybe_add(id, maps:get(<<"id">>, Data, undefined), Response0);
-decode(#{<<"jsonrpc">> := ?VERSION, <<"error">> := Error} = Data) ->
+decode(#{<<"jsonrpc">> := ?VERSION, <<"error">> := Error} = Data) when is_map(Error) ->
   Error0 = #{code => maps:get(<<"code">>, Error)},
   Error1 = maybe_add(message, maps:get(<<"message">>, Error, undefined), Error0),
   Error2 = maybe_add(data, maps:get(<<"data">>, Error, undefined), Error1),
   Response0 = #{error => Error2},
   maybe_add(id, maps:get(<<"id">>, Data, undefined), Response0);
+decode([First | _] = Data) when is_map(First) ->
+  lists:map(fun decode/1, Data);
 decode(Data) when is_binary(Data) ->
   case json:decode(Data) of
     DecodedData when is_list(DecodedData) ->
@@ -82,29 +96,25 @@ decode(Data) when is_binary(Data) ->
       decode(DecodedData)
   end;
 decode(Data) when is_list(Data) ->
-  decode(list_to_binary(Data));
-decode(_) ->
-  % need to convert it here, otherwise list function clause will triggered
+  decode(iolist_to_binary(Data));
+decode(_Other) ->
   list_to_binary(error_response(?PARSE_ERROR, <<"Parse error">>, null)).
 
--spec notification(binary()) -> iodata().
+-spec notification(method()) -> iodata().
 notification(Method) ->
   request(Method, undefined, undefined).
 
--spec notification(binary(), params()) -> iodata().
+-spec notification(method(), params()) -> iodata().
 notification(Method, Params) ->
   request(Method, Params, undefined).
 
--spec request(method(), params(), id() | undefined) ->
-  iodata().
-request(Method, Params, Id) when is_binary(Method) ->
+-spec request(method(), params(), id() | undefined) -> iodata().
+request(Method, Params, Id) ->
   Command0 = #{jsonrpc => ?VERSION,
-               method => Method},
+               method => to_binary(Method)},
   Command1 = maybe_add(params, Params, Command0),
   Command2 = maybe_add(id, Id, Command1),
-  json:encode(Command2);
-request(Method, Params, Id) when is_list(Method) ->
-  request(list_to_binary(Method), Params, Id).
+  json:encode(Command2).
 
 -spec response(term(), id()) -> iodata().
 response(Result, Id) ->
@@ -113,14 +123,14 @@ response(Result, Id) ->
                id => Id},
   json:encode(Response).
 
--spec error_response(integer(), binary(), id()) -> iodata().
+-spec error_response(integer(), binary() | string(), id()) -> iodata().
 error_response(Code, Message, Id) ->
   error_response(Code, Message, Id, undefined).
 
--spec error_response(integer(), binary(), id(), term() | undefined) -> iodata().
-error_response(Code, Message, Id, ErrorData)  when is_binary(Message) ->
+-spec error_response(integer(), binary() | string(), id(), term() | undefined) -> iodata().
+error_response(Code, Message, Id, ErrorData) ->
   Response = #{jsonrpc => ?VERSION,
-               error => maybe_add(data, ErrorData, #{code => Code, message => Message}),
+               error => maybe_add(data, ErrorData, #{code => Code, message => to_binary(Message)}),
                id => Id},
   json:encode(Response).
 
@@ -130,16 +140,90 @@ maybe_add(_Key, undefined, Acc) ->
 maybe_add(Key, Value, Acc) ->
   Acc#{Key => Value}.
 
-execute(#{method := Method} = DecodedRequest) when is_binary(Method) ->
-  Id = maps:get(id, DecodedRequest, null),
+to_binary(Val) when is_binary(Val) ->
+  Val;
+to_binary(Val) when is_list(Val) ->
+  unicode:characters_to_binary(Val).
+
+execute_batch(Batch) ->
+  Spawned = lists:map(fun spawn_execute/1, Batch),
+  Results = gather_results(Spawned),
+  case [R || R <- Results, R =/= no_response] of
+    [] ->
+      no_response;
+    Responses ->
+      ["[", lists:join(<<",">>, Responses), "]"]
+  end.
+
+spawn_execute(Request) ->
+  Parent = self(),
+  Ref = make_ref(),
+  {Pid, MonRef} = spawn_monitor(fun() ->
+    Res = execute_single(Request),
+    Parent ! {Ref, Res}
+  end),
+  {Pid, MonRef, Ref}.
+
+gather_results(Spawned) ->
+  lists:map(fun({Pid, MonRef, Ref}) ->
+    receive
+      {Ref, Result} ->
+        erlang:demonitor(MonRef, [flush]),
+        Result;
+      {'DOWN', MonRef, process, Pid, Reason} ->
+        error_response(?INTERNAL_ERROR, <<"Internal error">>, null, Reason)
+    end
+  end, Spawned).
+
+execute_single(#{<<"jsonrpc">> := ?VERSION, <<"method">> := Method} = Req)
+    when is_binary(Method) ->
+  Params = maps:get(<<"params">>, Req, undefined),
+  case is_valid_params(Params) of
+    false ->
+      error_response(?INVALID_REQUEST, <<"Invalid Request">>, null);
+    true when is_map_key(<<"id">>, Req) ->
+      Id = maps:get(<<"id">>, Req),
+      case is_valid_id(Id) of
+        true ->
+          dispatch_call(Method, Params, Id);
+        false ->
+          error_response(?INVALID_REQUEST, <<"Invalid Request">>, null)
+      end;
+    true ->
+      dispatch_notification(Method, Params)
+  end;
+execute_single(_) ->
+  error_response(?INVALID_REQUEST, <<"Invalid Request">>, null).
+
+is_valid_params(undefined) -> true;
+is_valid_params(Params) when is_list(Params) -> true;
+is_valid_params(Params) when is_map(Params) -> true;
+is_valid_params(_) -> false.
+
+is_valid_id(null) -> true;
+is_valid_id(Id) when is_integer(Id) -> true;
+is_valid_id(Id) when is_binary(Id) -> true;
+is_valid_id(_) -> false.
+
+dispatch_notification(Method, Params) ->
+  case persistent_term:get({?MODULE, Method}, undefined) of
+    undefined ->
+      error_response(?METHOD_NOT_FOUND, <<"Method not found">>, null);
+    Function ->
+      % notification should be return with ok
+      ok = execute_function(Function, Params),
+      no_response
+  end.
+
+dispatch_call(Method, Params, Id) ->
   case persistent_term:get({?MODULE, Method}, undefined) of
     undefined ->
       error_response(?METHOD_NOT_FOUND, <<"Method not found">>, Id);
     Function ->
-      try execute(Function, maps:get(params, DecodedRequest, undefined)) of
+      try execute_function(Function, Params) of
         {ok, Result} ->
           response(Result, Id);
-        ok -> % notification of calls where we do not want to response
+        ok -> % should we support this? I mean call should return with a reply
           no_response;
         {error, {Code, Message}} ->
           error_response(Code, Message, Id);
@@ -148,65 +232,20 @@ execute(#{method := Method} = DecodedRequest) when is_binary(Method) ->
         {error, Data} ->
           error_response(?INTERNAL_ERROR, <<"Internal error">>, Id, Data);
         Else ->
-          error_response(?INTERNAL_ERROR, <<"Internal error">>, Id, {not_proper_response, Else})
+          error_response(?INTERNAL_ERROR, <<"Internal error">>, Id,
+                         {not_proper_response, Else})
       catch
-        T:E:_ST ->
-          error_response(?INTERNAL_ERROR, <<"Internal error">>, Id, io_lib:bformat("~p ~p", [T, E]))
+        error:{badarity, _}:_Stack ->
+          error_response(?INVALID_PARAMS, <<"Invalid params">>, Id);
+        Type:Error:_Stack ->
+          error_response(?INTERNAL_ERROR, <<"Internal error">>, Id,
+                         io_lib:bformat("~p ~p", [Type, Error]))
       end
-  end;
-execute([]) ->
-  list_to_binary(error_response(?INVALID_REQUEST, <<"Invalid Request">>, null));
-execute(Requests) when is_list(Requests) ->
-  gather_results(lists:map(fun spawn_execute/1, Requests), ["]"]);
-execute(_) ->
-  error_response(?INVALID_REQUEST, <<"Invalid Request">>, null).
+  end.
 
-spawn_execute(Request) ->
-  Parent = self(),
-  Ref2 = make_ref(),
-  {Pid, Ref} = spawn_monitor(fun() -> Parent ! {Ref2, execute(Request)} end),
-  {Pid, Ref, Ref2}.
-
-gather_results([{Pid, Ref, Ref2}], Acc) ->
-  EndResult = receive
-                {Ref2, Result} ->
-                  erlang:demonitor(Ref, [flush]),
-                  Result;
-                {'DOWN', Ref, process, Pid, Reason} ->
-                  error_response(?INTERNAL_ERROR, <<"Internal error">>, null, Reason)
-              end,
-  case EndResult of
-    no_response ->
-      gather_results([], Acc);
-    _ ->
-      gather_results([], ["[", [EndResult | Acc]])
-  end;
-gather_results([{Pid, Ref, Ref2} | Rest], Acc) ->
-  EndResult = receive
-                {Ref2, Result} ->
-                  erlang:demonitor(Ref, [flush]),
-                  Result;
-                {'DOWN', Ref, process, Pid, Reason} ->
-                  error_response(?INTERNAL_ERROR, <<"Internal error">>, null, Reason)
-              end,
-  case EndResult of
-    no_response ->
-      gather_results(Rest, Acc);
-    _ ->
-      gather_results(Rest, ["," | [EndResult | Acc]])
-  end;
-gather_results([], ["]"]) ->
-  % in case of empty response
-  no_response;
-gather_results([], Acc) ->
-  Acc.
-
--spec execute(function(), params()) -> term().
-execute(Function, undefined) ->
+execute_function(Function, undefined) ->
   erlang:apply(Function, []);
-execute(Function, Params) when is_list(Params) ->
+execute_function(Function, Params) when is_list(Params) ->
   erlang:apply(Function, Params);
-execute(Function, Params) when is_map(Params) ->
-  erlang:apply(Function, [Params]);
-execute(_Function, _Params) ->
-  {error, {?INVALID_REQUEST, <<"Invalid Request">>}}.
+execute_function(Function, Params) when is_map(Params) ->
+  erlang:apply(Function, [Params]).
