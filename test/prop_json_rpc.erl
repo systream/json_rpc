@@ -97,9 +97,9 @@ success_response() ->
 
 error_response() ->
     oneof([
-        {error, term()},
+        {error, safe_binary()},
         {error, {code(), safe_binary()}},
-        {error, {code(), safe_binary(), term()}}
+        {error, {code(), safe_binary(), safe_binary()}}
     ]).
 
 response() ->

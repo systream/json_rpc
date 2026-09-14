@@ -46,14 +46,22 @@ unregister(Method) ->
 
 -spec handle_request(iodata() | binary()) -> iodata() | no_response.
 handle_request(Request) ->
+  case decode_json(Request) of
+    {ok, Single} when is_map(Single) ->
+      execute_single(Single);
+    {ok, Batch} when is_list(Batch) ->
+      execute_batch(Batch);
+    Error ->
+      Error
+  end.
+
+decode_json(Request) when is_binary(Request) ->
   try
     case json:decode(Request) of
       [] ->
         error_response(?INVALID_REQUEST, <<"Invalid Request">>, null);
-      Single when is_map(Single) ->
-        execute_single(Single);
-      Batch when is_list(Batch) ->
-        execute_batch(Batch);
+      Result when is_map(Result) orelse is_list(Result) ->
+        {ok, Result};
       _Other ->
         error_response(?INVALID_REQUEST, <<"Invalid Request">>, null)
     end
@@ -63,10 +71,12 @@ handle_request(Request) ->
     error:unexpected_end:_Stack ->
       error_response(?PARSE_ERROR, <<"Parse error">>, null);
     error:{unexpected_sequence, _}:_Stack ->
-      error_response(?PARSE_ERROR, <<"Parse error">>, null);
-    _Type:_Error:_Stack ->
-      error_response(?PARSE_ERROR, <<"Parse error">>, null)
-  end.
+      error_response(?PARSE_ERROR, <<"Parse error">>, null)%;
+    %_Type:_Error:_Stack ->
+    %  error_response(?PARSE_ERROR, <<"Parse error">>, null)
+  end;
+decode_json(Request) when is_list(Request) ->
+  decode_json(iolist_to_binary(Request)).
 
 -spec decode(binary() | iodata() | map() | list()) ->
   #{method := binary(), params => list() | map(), id => id()} |
@@ -181,16 +191,14 @@ execute_single(#{<<"jsonrpc">> := ?VERSION, <<"method">> := Method} = Req)
   case is_valid_params(Params) of
     false ->
       error_response(?INVALID_REQUEST, <<"Invalid Request">>, null);
-    true when is_map_key(<<"id">>, Req) ->
-      Id = maps:get(<<"id">>, Req),
+    true ->
+      Id = maps:get(<<"id">>, Req, null),
       case is_valid_id(Id) of
         true ->
-          dispatch_call(Method, Params, Id);
+          dispatch(Method, Params, Id);
         false ->
           error_response(?INVALID_REQUEST, <<"Invalid Request">>, null)
-      end;
-    true ->
-      dispatch_notification(Method, Params)
+      end
   end;
 execute_single(_) ->
   error_response(?INVALID_REQUEST, <<"Invalid Request">>, null).
@@ -205,25 +213,15 @@ is_valid_id(Id) when is_integer(Id) -> true;
 is_valid_id(Id) when is_binary(Id) -> true;
 is_valid_id(_) -> false.
 
-dispatch_notification(Method, Params) ->
-  case persistent_term:get({?MODULE, Method}, undefined) of
-    undefined ->
-      error_response(?METHOD_NOT_FOUND, <<"Method not found">>, null);
-    Function ->
-      % notification should be return with ok
-      ok = execute_function(Function, Params),
-      no_response
-  end.
-
-dispatch_call(Method, Params, Id) ->
+dispatch(Method, Params, Id) ->
   case persistent_term:get({?MODULE, Method}, undefined) of
     undefined ->
       error_response(?METHOD_NOT_FOUND, <<"Method not found">>, Id);
     Function ->
       try execute_function(Function, Params) of
-        {ok, Result} ->
+        {ok, Result} when Id =/= null ->
           response(Result, Id);
-        ok -> % should we support this? I mean call should return with a reply
+        ok when Id =:= null -> % should we support this? I mean call should return with a reply
           no_response;
         {error, {Code, Message}} ->
           error_response(Code, Message, Id);
@@ -231,9 +229,8 @@ dispatch_call(Method, Params, Id) ->
           error_response(Code, Message, Id, Data);
         {error, Data} ->
           error_response(?INTERNAL_ERROR, <<"Internal error">>, Id, Data);
-        Else ->
-          error_response(?INTERNAL_ERROR, <<"Internal error">>, Id,
-                         {not_proper_response, Else})
+        _Else ->
+          error_response(?INTERNAL_ERROR, <<"Internal error">>, Id, not_proper_response)
       catch
         error:{badarity, _}:_Stack ->
           error_response(?INVALID_PARAMS, <<"Invalid params">>, Id);

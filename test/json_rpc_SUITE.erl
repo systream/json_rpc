@@ -115,8 +115,9 @@ notification_test(_Config) ->
     _ModuleB = meck_fun(<<"update">>, fun() -> ok end),
     ?assertEqual(no_response, json_rpc:handle_request(ReqNoParams)),
 
-    % error parameter scenario for notification returns no_response per spec Section 4.1
-    ?assertEqual(no_response, json_rpc:handle_request(Req)),
+    assertEncode(<<"{\"jsonrpc\": \"2.0\",",
+                    "\"error\": {\"code\": -32602, \"message\": \"Invalid params\"},",
+                    "\"id\": null}">>, json_rpc:handle_request(Req)),
 
     % request with ID calling with bad params returns Invalid params error (-32602) with ID
     ReqWithId = <<"{\"jsonrpc\": \"2.0\", \"method\": \"update\", \"params\": [1,2,3,4,5], \"id\": 99}">>,
@@ -131,22 +132,30 @@ notification_test(_Config) ->
 notification_error_scenarios_test(_Config) ->
     % 1. Method not found on notification
     Req1 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"non_existent_notify\"}">>,
-    ?assertEqual(no_response, json_rpc:handle_request(Req1)),
+    assertEncode(<<"{\"jsonrpc\": \"2.0\",
+                    \"error\": {\"code\": -32601, \"message\": \"Method not found\"},
+                    \"id\": null}">>, json_rpc:handle_request(Req1)),
 
     % 2. Handler crash on notification
     meck_fun(<<"crash_notify">>, fun() -> error(boom) end),
     Req2 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"crash_notify\"}">>,
-    ?assertEqual(no_response, json_rpc:handle_request(Req2)),
+    assertEncode(<<"{\"jsonrpc\": \"2.0\",
+                    \"error\": {\"code\": -32603, \"data\": \"error boom\", \"message\": \"Internal error\"},
+                    \"id\": null}">>, json_rpc:handle_request(Req2)),
 
     % 3. Handler returns {error, ...} on notification
     meck_fun(<<"err_notify">>, fun() -> {error, {123, <<"fail">>}} end),
     Req3 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"err_notify\"}">>,
-    ?assertEqual(no_response, json_rpc:handle_request(Req3)),
+    assertEncode(<<"{\"jsonrpc\": \"2.0\",
+                    \"error\": {\"code\": 123, \"message\": \"fail\"},
+                    \"id\": null}">>, json_rpc:handle_request(Req3)),
 
     % 4. Handler returns {ok, Result} on notification
     meck_fun(<<"ok_notify">>, fun() -> {ok, <<"ignored_result">>} end),
     Req4 = <<"{\"jsonrpc\": \"2.0\", \"method\": \"ok_notify\"}">>,
-    ?assertEqual(no_response, json_rpc:handle_request(Req4)),
+    assertEncode(<<"{\"jsonrpc\": \"2.0\",
+                    \"error\": {\"code\": -32603, \"data\": \"not_proper_response\", \"message\": \"Internal error\"},
+                    \"id\": null}">>, json_rpc:handle_request(Req4)),
 
     json_rpc:unregister(<<"crash_notify">>),
     json_rpc:unregister(<<"err_notify">>),
